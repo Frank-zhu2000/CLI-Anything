@@ -10,7 +10,7 @@ import math
 from typing import Any, Dict, List, Optional
 
 from cli_anything.freecad.core.document import ensure_collection
-from cli_anything.freecad.core.parts import PRIMITIVES, get_part
+from cli_anything.freecad.core.parts import PRIMITIVES, _transform_point, get_part
 
 
 # ---------------------------------------------------------------------------
@@ -101,21 +101,29 @@ def _uniform_center_of_mass(part: Dict[str, Any]) -> List[float]:
 
     A zero-radius cone (both radii 0) falls back to the segment midpoint.
     Revolution angles are ignored, matching ``_compute_volume``.
-    """
-    if part["type"] != "cone":
-        return _bbox_center(part)
 
+    The local offset is rotated by the placement before the placement
+    position is added, using the same XYZ Euler convention as
+    ``_transform_point`` (``FreeCAD.Rotation(rz, ry, rx)``).
+    """
     pos = _get_position(part)
-    p = part["params"]
-    r1 = float(p["radius1"])
-    r2 = float(p["radius2"])
-    height = float(p["height"])
-    denom = r1 * r1 + r1 * r2 + r2 * r2
-    if denom == 0.0:
-        z_offset = height / 2.0
+    if part["type"] == "cone":
+        p = part["params"]
+        r1 = float(p["radius1"])
+        r2 = float(p["radius2"])
+        height = float(p["height"])
+        denom = r1 * r1 + r1 * r2 + r2 * r2
+        if denom == 0.0:
+            z_offset = height / 2.0
+        else:
+            z_offset = height * (r1 * r1 + 2.0 * r1 * r2 + 3.0 * r2 * r2) / (4.0 * denom)
+        local = [0.0, 0.0, z_offset]
     else:
-        z_offset = height * (r1 * r1 + 2.0 * r1 * r2 + 3.0 * r2 * r2) / (4.0 * denom)
-    return [pos[0], pos[1], pos[2] + z_offset]
+        unrotated = _bbox_center(part)
+        local = [unrotated[i] - pos[i] for i in range(3)]
+
+    rotation = part.get("placement", {}).get("rotation", [0.0, 0.0, 0.0])
+    return _transform_point(local, rotation, pos)
 
 
 # ---------------------------------------------------------------------------

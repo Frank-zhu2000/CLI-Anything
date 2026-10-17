@@ -1486,3 +1486,81 @@ class TestMeasureCenterOfMass:
         add_part(proj, part_type, position=position, params=params)
         result = measure_center_of_mass(proj, 0)
         assert result["center_of_mass"] == expected
+
+    @pytest.mark.parametrize(
+        ("part_type", "params", "position", "rotation", "expected"),
+        [
+            # Local +Z centroid must be rotated by the placement (XYZ Euler,
+            # Rx then Ry then Rz) before the placement position is added.
+            ("cylinder", {"radius": 5.0, "height": 12.0}, [0.0, 0.0, 0.0], [90.0, 0.0, 0.0], [0.0, -6.0, 0.0]),
+            ("cylinder", {"radius": 2.0, "height": 8.0}, [3.0, -4.0, 1.0], [0.0, 90.0, 0.0], [7.0, -4.0, 1.0]),
+            # Rz(50) Ry(-20) Rx(30) applied to local [0, 0, 6], then + [1, 2, 3].
+            (
+                "cylinder",
+                {"radius": 5.0, "height": 12.0},
+                [1.0, 2.0, 3.0],
+                [30.0, -20.0, 50.0],
+                [2.155778, -1.289768, 7.882786],
+            ),
+            # Pointed cone of height 12: local COM [0, 0, 3], rotation [90, 0, 0].
+            (
+                "cone",
+                {"radius1": 6.0, "radius2": 0.0, "height": 12.0},
+                [0.0, 0.0, 0.0],
+                [90.0, 0.0, 0.0],
+                [0.0, -3.0, 0.0],
+            ),
+            (
+                "cone",
+                {"radius1": 6.0, "radius2": 0.0, "height": 12.0},
+                [10.0, -3.0, 2.0],
+                [0.0, 90.0, 0.0],
+                [13.0, -3.0, 2.0],
+            ),
+            # Rz(-25) Ry(40) Rx(15) applied to local [0, 0, 3], then + [4, -1, 2.5].
+            (
+                "cone",
+                {"radius1": 6.0, "radius2": 0.0, "height": 12.0},
+                [4.0, -1.0, 2.5],
+                [15.0, 40.0, -25.0],
+                [5.359994, -2.490901, 4.719826],
+            ),
+            # Frustum local z = 528/112, then Rz(15) Ry(-35) Rx(25), then + [5, 6, 7].
+            (
+                "cone",
+                {"radius1": 4.0, "radius2": 2.0, "height": 12.0},
+                [5.0, 6.0, 7.0],
+                [25.0, -35.0, 15.0],
+                [3.148501, 3.441267, 10.499904],
+            ),
+            # Box and wedge centroids are local offsets too, not only +Z.
+            # Rx(90) on [5, 2, 1] is [5, -1, 2], then + [1, 2, 3].
+            (
+                "box",
+                {"length": 10.0, "width": 4.0, "height": 2.0},
+                [1.0, 2.0, 3.0],
+                [90.0, 0.0, 0.0],
+                [6.0, 1.0, 5.0],
+            ),
+            # Ry(90) on the wedge bbox centroid [5, 5, 5] is [5, 5, -5].
+            (
+                "wedge",
+                {
+                    "xmin": 0.0, "ymin": 0.0, "zmin": 0.0,
+                    "xmax": 10.0, "ymax": 10.0, "zmax": 10.0,
+                },
+                [0.0, 0.0, 0.0],
+                [0.0, 90.0, 0.0],
+                [5.0, 5.0, -5.0],
+            ),
+        ],
+    )
+    def test_rotates_local_centroid_with_placement(
+        self, part_type, params, position, rotation, expected,
+    ):
+        proj = _make_project()
+        add_part(
+            proj, part_type, position=position, rotation=rotation, params=params,
+        )
+        result = measure_center_of_mass(proj, 0)
+        assert result["center_of_mass"] == expected
