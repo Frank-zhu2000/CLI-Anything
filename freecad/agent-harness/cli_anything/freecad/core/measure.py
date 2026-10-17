@@ -47,7 +47,13 @@ def _get_position(part: Dict[str, Any]) -> List[float]:
 
 
 def _bbox_center(part: Dict[str, Any]) -> List[float]:
-    """Estimate the bounding-box centre of a part from its position and params."""
+    """Estimate the bounding-box centre of a part from its position and params.
+
+    Placement follows the same local frames as ``measure_bounding_box``:
+    a box and a wedge start at a corner, a cylinder and a cone are centred
+    on +Z with the base at the placement, and a sphere and a torus are
+    centred on the placement.
+    """
     pos = _get_position(part)
     p = part["params"]
     t = part["type"]
@@ -59,30 +65,21 @@ def _bbox_center(part: Dict[str, Any]) -> List[float]:
             pos[2] + p["height"] / 2.0,
         ]
     elif t == "cylinder":
-        r = p["radius"]
         return [
-            pos[0] + r,
-            pos[1] + r,
+            pos[0],
+            pos[1],
             pos[2] + p["height"] / 2.0,
         ]
     elif t == "sphere":
-        r = p["radius"]
-        return [pos[0] + r, pos[1] + r, pos[2] + r]
+        return [pos[0], pos[1], pos[2]]
     elif t == "cone":
-        r = max(p["radius1"], p["radius2"])
         return [
-            pos[0] + r,
-            pos[1] + r,
+            pos[0],
+            pos[1],
             pos[2] + p["height"] / 2.0,
         ]
     elif t == "torus":
-        R = p["radius1"]
-        r = p["radius2"]
-        return [
-            pos[0] + R + r,
-            pos[1] + R + r,
-            pos[2] + r,
-        ]
+        return [pos[0], pos[1], pos[2]]
     elif t == "wedge":
         return [
             pos[0] + (p["xmin"] + p["xmax"]) / 2.0,
@@ -91,6 +88,34 @@ def _bbox_center(part: Dict[str, Any]) -> List[float]:
         ]
     # Boolean or unknown — fall back to placement position
     return pos
+
+
+def _uniform_center_of_mass(part: Dict[str, Any]) -> List[float]:
+    """Centre of mass of a uniform-density primitive in world coordinates.
+
+    Local offsets use the same placement frames as ``_bbox_center``. A
+    conical frustum is the one primitive whose centroid is not the
+    bounding-box centre. Measured from the radius1 face along +Z:
+
+        z = H * (R1**2 + 2*R1*R2 + 3*R2**2) / (4 * (R1**2 + R1*R2 + R2**2))
+
+    A zero-radius cone (both radii 0) falls back to the segment midpoint.
+    Revolution angles are ignored, matching ``_compute_volume``.
+    """
+    if part["type"] != "cone":
+        return _bbox_center(part)
+
+    pos = _get_position(part)
+    p = part["params"]
+    r1 = float(p["radius1"])
+    r2 = float(p["radius2"])
+    height = float(p["height"])
+    denom = r1 * r1 + r1 * r2 + r2 * r2
+    if denom == 0.0:
+        z_offset = height / 2.0
+    else:
+        z_offset = height * (r1 * r1 + 2.0 * r1 * r2 + 3.0 * r2 * r2) / (4.0 * denom)
+    return [pos[0], pos[1], pos[2] + z_offset]
 
 
 # ---------------------------------------------------------------------------
@@ -517,10 +542,11 @@ def measure_center_of_mass(
     project: Dict[str, Any], index: int,
     additive: bool = False,
 ) -> Dict[str, Any]:
-    """Estimate the centre of mass (geometric centre for simple shapes).
+    """Estimate the centre of mass of a uniform-density part.
 
-    For uniform-density primitives the centre of mass coincides with the
-    bounding-box centre.
+    Sphere, cylinder, box, wedge, and torus centroids coincide with the
+    bounding-box centre. A cone does not: its centroid lies on the axis,
+    at the solid-frustum position measured from the radius1 face.
 
     Returns
     -------
@@ -528,7 +554,7 @@ def measure_center_of_mass(
         Measurement record with ``center_of_mass`` ``[x, y, z]``.
     """
     part = get_part(project, index)
-    com = _bbox_center(part)
+    com = _uniform_center_of_mass(part)
 
     result_com: Dict[str, Any] = {
         "part_index": index,

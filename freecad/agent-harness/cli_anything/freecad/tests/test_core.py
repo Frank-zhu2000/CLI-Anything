@@ -20,6 +20,7 @@ from cli_anything.freecad.core.document import (
     open_document,
     save_document,
 )
+from cli_anything.freecad.core.measure import measure_center_of_mass
 from cli_anything.freecad.core.parts import (
     PRIMITIVES,
     add_part,
@@ -1437,3 +1438,51 @@ class TestFreeCADBackend:
         assert captured["args"] == [str(wrapper), "freecad", str(script_path.resolve())]
         assert captured["timeout"] == 55
         assert captured["env"] == {"QT_QPA_PLATFORM": "offscreen"}
+
+
+# ===========================================================================
+# TestMeasureCenterOfMass
+# ===========================================================================
+
+
+class TestMeasureCenterOfMass:
+    """Uniform-density centre of mass for Part primitives.
+
+    Local frames follow FreeCAD and ``_local_bounds``: a sphere and a torus
+    are centred on the placement; a cylinder and a cone stand on +Z with the
+    bottom face centred on the placement. The centroid of a conical frustum,
+    measured from the radius1 face, is
+
+        z = H * (R1**2 + 2*R1*R2 + 3*R2**2) / (4 * (R1**2 + R1*R2 + R2**2))
+
+    That is H/4 for a cone (R2 = 0), 3H/4 when the apex sits on the placement
+    (R1 = 0), and H/2 when R1 == R2. Translation is the placement position.
+    """
+
+    @pytest.mark.parametrize(
+        ("part_type", "params", "position", "expected"),
+        [
+            # Issue #452: a sphere at the origin is not at (radius, radius, radius).
+            ("sphere", {"radius": 10.0}, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            ("sphere", {"radius": 4.0}, [1.5, -2.0, 4.25], [1.5, -2.0, 4.25]),
+            ("cylinder", {"radius": 5.0, "height": 12.0}, [0.0, 0.0, 0.0], [0.0, 0.0, 6.0]),
+            ("cylinder", {"radius": 2.0, "height": 8.0}, [3.0, -4.0, 1.0], [3.0, -4.0, 5.0]),
+            ("cone", {"radius1": 6.0, "radius2": 0.0, "height": 12.0}, [0.0, 0.0, 0.0], [0.0, 0.0, 3.0]),
+            ("cone", {"radius1": 6.0, "radius2": 0.0, "height": 12.0}, [10.0, -3.0, 2.0], [10.0, -3.0, 5.0]),
+            ("cone", {"radius1": 0.0, "radius2": 6.0, "height": 12.0}, [1.0, 2.0, 3.0], [1.0, 2.0, 12.0]),
+            # R1=4, R2=2, H=12 -> 12*(16+16+12)/(4*(16+8+4)) = 528/112 = 4.7142857...
+            ("cone", {"radius1": 4.0, "radius2": 2.0, "height": 12.0}, [0.0, 0.0, 0.0], [0.0, 0.0, 4.714286]),
+            ("cone", {"radius1": 4.0, "radius2": 2.0, "height": 12.0}, [5.0, 6.0, 7.0], [5.0, 6.0, 11.714286]),
+            ("cone", {"radius1": 3.0, "radius2": 3.0, "height": 9.0}, [1.0, 1.0, 1.0], [1.0, 1.0, 5.5]),
+            ("torus", {"radius1": 10.0, "radius2": 2.0}, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            ("torus", {"radius1": 8.0, "radius2": 1.5}, [-8.0, 2.5, 6.0], [-8.0, 2.5, 6.0]),
+            # Control: a box placement is the minimum corner, so its centroid is offset.
+            ("box", {"length": 10.0, "width": 10.0, "height": 10.0}, [0.0, 0.0, 0.0], [5.0, 5.0, 5.0]),
+            ("box", {"length": 10.0, "width": 4.0, "height": 2.0}, [1.0, 2.0, 3.0], [6.0, 4.0, 4.0]),
+        ],
+    )
+    def test_matches_analytic_center_of_mass(self, part_type, params, position, expected):
+        proj = _make_project()
+        add_part(proj, part_type, position=position, params=params)
+        result = measure_center_of_mass(proj, 0)
+        assert result["center_of_mass"] == expected
