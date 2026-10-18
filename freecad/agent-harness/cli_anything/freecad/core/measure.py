@@ -13,7 +13,6 @@ from cli_anything.freecad.core.document import ensure_collection
 from cli_anything.freecad.core.parts import (
     PRIMITIVES,
     _rotation_matrix,
-    _transform_point,
     get_part,
 )
 
@@ -84,19 +83,110 @@ def _local_bbox_center(part: Dict[str, Any]) -> List[float]:
     return [0.0, 0.0, 0.0]
 
 
-def _bbox_center(part: Dict[str, Any]) -> List[float]:
-    """Estimate the bounding-box centre of a part in world coordinates.
+def _rotation_to_matrix(rotation: Any) -> List[List[float]]:
+    """Normalize a placement rotation to one 3x3 matrix.
 
-    Placement follows the same local frames as ``measure_bounding_box``:
-    a box and a wedge start at a corner, a cylinder and a cone are centred
-    on +Z with the base at the placement, and a sphere and a torus are
-    centred on the placement. The local offset is rotated by the placement
-    before the placement position is added, using ``_transform_point``
-    (``FreeCAD.Rotation(rz, ry, rx)``).
+    The forms are exactly those ``_gen_placements`` emits to FreeCAD:
+
+    * list or tuple ``[rx, ry, rz]`` degrees becomes
+      ``FreeCAD.Rotation(rz, ry, rx)`` (``Rz(rz) @ Ry(ry) @ Rx(rx)``).
+    * dict ``{"axis": {"x", "y", "z"}, "angle": degrees}`` becomes
+      ``FreeCAD.Rotation(Vector(axis), angle)``. Missing axis components
+      default to ``x=0``, ``y=0``, ``z=1``. A zero-length axis falls back
+      to +Z, matching FreeCAD.
+    * dict ``{"yaw", "pitch", "roll"}`` degrees becomes
+      ``FreeCAD.Rotation(yaw, pitch, roll)``, which is list
+      ``[roll, pitch, yaw]``.
+    * any other mapping, including ``{}``, is the identity.
     """
-    pos = _get_position(part)
+    if isinstance(rotation, (list, tuple)):
+        rx = float(rotation[0]) if len(rotation) > 0 else 0.0
+        ry = float(rotation[1]) if len(rotation) > 1 else 0.0
+        rz = float(rotation[2]) if len(rotation) > 2 else 0.0
+        return _rotation_matrix([rx, ry, rz])
+    if isinstance(rotation, dict):
+        if "axis" in rotation and "angle" in rotation:
+            return _axis_angle_matrix(rotation["axis"], rotation["angle"])
+        if any(key in rotation for key in ("yaw", "pitch", "roll")):
+            yaw = float(rotation.get("yaw", 0.0))
+            pitch = float(rotation.get("pitch", 0.0))
+            roll = float(rotation.get("roll", 0.0))
+            return _rotation_matrix([roll, pitch, yaw])
+    return _rotation_matrix([0.0, 0.0, 0.0])
+
+
+def _axis_angle_matrix(axis: Any, angle_deg: Any) -> List[List[float]]:
+    """Rodrigues matrix for FreeCAD's degree axis-angle constructor."""
+    if not isinstance(axis, dict):
+        raise TypeError("placement rotation axis must be a dict with x, y, z")
+    ax = float(axis.get("x", 0.0))
+    ay = float(axis.get("y", 0.0))
+    az = float(axis.get("z", 1.0))
+    theta = math.radians(float(angle_deg))
+    length = math.hypot(ax, ay, az)
+    if length == 0.0:
+        ax, ay, az = 0.0, 0.0, 1.0
+    else:
+        ax /= length
+        ay /= length
+        az /= length
+    cosine = math.cos(theta)
+    sine = math.sin(theta)
+    complement = 1.0 - cosine
+    return [
+        [
+            cosine + complement * ax * ax,
+            complement * ax * ay - sine * az,
+            complement * ax * az + sine * ay,
+        ],
+        [
+            complement * ay * ax + sine * az,
+            cosine + complement * ay * ay,
+            complement * ay * az - sine * ax,
+        ],
+        [
+            complement * az * ax - sine * ay,
+            complement * az * ay + sine * ax,
+            cosine + complement * az * az,
+        ],
+    ]
+
+
+def _part_rotation_matrix(part: Dict[str, Any]) -> List[List[float]]:
+    """Rotation matrix for a part placement. Missing rotation is identity."""
     rotation = part.get("placement", {}).get("rotation", [0.0, 0.0, 0.0])
-    return _transform_point(_local_bbox_center(part), rotation, pos)
+    return _rotation_to_matrix(rotation)
+
+
+def _apply_rotation(
+    point: List[float],
+    matrix: List[List[float]],
+    translation: List[float],
+) -> List[float]:
+    """Apply a placement matrix and translation to a local point."""
+    x, y, z = (float(v) for v in point)
+    tx, ty, tz = translation
+    return [
+        matrix[0][0] * x + matrix[0][1] * y + matrix[0][2] * z + tx,
+        matrix[1][0] * x + matrix[1][1] * y + matrix[1][2] * z + ty,
+        matrix[2][0] * x + matrix[2][1] * y + matrix[2][2] * z + tz,
+    ]
+
+
+def _bbox_center(part: Dict[str, Any]) -> List[float]:
+    """Return the centre of the part's world axis-aligned bounds.
+
+    The midpoint is taken from the same min/max as ``measure_bounding_box``.
+    A symmetric solid's midpoint is the rotated local centre. An
+    unequal-radius cone is not: its end disks set asymmetric extrema, so
+    rotating the local ``height / 2`` point is not the world-bounds centre.
+    """
+    bounds = _part_world_aabb(part)
+    if bounds is None:
+        pos = _get_position(part)
+        return _apply_rotation([0.0, 0.0, 0.0], _part_rotation_matrix(part), pos)
+    bb_min, bb_max = bounds
+    return [(bb_min[i] + bb_max[i]) / 2.0 for i in range(3)]
 
 
 def _uniform_center_of_mass(part: Dict[str, Any]) -> List[float]:
@@ -111,9 +201,9 @@ def _uniform_center_of_mass(part: Dict[str, Any]) -> List[float]:
     A zero-radius cone (both radii 0) falls back to the segment midpoint.
     Revolution angles are ignored, matching ``_compute_volume``.
 
-    The local offset is rotated by the placement before the placement
-    position is added, using the same XYZ Euler convention as
-    ``_transform_point`` (``FreeCAD.Rotation(rz, ry, rx)``).
+    The local offset is rotated by ``_rotation_to_matrix``, which accepts
+    every placement form ``_gen_placements`` emits, then the placement
+    position is added.
     """
     pos = _get_position(part)
     if part["type"] == "cone":
@@ -130,8 +220,7 @@ def _uniform_center_of_mass(part: Dict[str, Any]) -> List[float]:
     else:
         local = _local_bbox_center(part)
 
-    rotation = part.get("placement", {}).get("rotation", [0.0, 0.0, 0.0])
-    return _transform_point(local, rotation, pos)
+    return _apply_rotation(local, _part_rotation_matrix(part), pos)
 
 
 # ---------------------------------------------------------------------------
@@ -623,8 +712,7 @@ def _curved_support_aabb(part: Dict[str, Any]) -> tuple:
     not rotated: they lie outside the solid.
     """
     pos = _get_position(part)
-    rotation = part.get("placement", {}).get("rotation", [0.0, 0.0, 0.0])
-    matrix = _rotation_matrix(rotation)
+    matrix = _part_rotation_matrix(part)
     part_type = part["type"]
     params = part["params"]
     bb_min: List[float] = []
@@ -645,14 +733,14 @@ def _rotated_aabb(
 ) -> tuple:
     """Axis-aligned bounds of a local box after the placement rotation.
 
-    Corners are rotated with ``_transform_point`` about the placement, then
-    the world-axis min and max are taken. An identity rotation leaves the
-    translated local box unchanged.
+    Corners are rotated about the placement, then the world-axis min and
+    max are taken. An identity rotation leaves the translated local box
+    unchanged.
     """
     pos = _get_position(part)
-    rotation = part.get("placement", {}).get("rotation", [0.0, 0.0, 0.0])
+    matrix = _part_rotation_matrix(part)
     corners = [
-        _transform_point([x, y, z], rotation, pos)
+        _apply_rotation([x, y, z], matrix, pos)
         for x in (local_min[0], local_max[0])
         for y in (local_min[1], local_max[1])
         for z in (local_min[2], local_max[2])
@@ -660,6 +748,32 @@ def _rotated_aabb(
     bb_min = [min(corner[axis] for corner in corners) for axis in range(3)]
     bb_max = [max(corner[axis] for corner in corners) for axis in range(3)]
     return bb_min, bb_max
+
+
+def _part_world_aabb(part: Dict[str, Any]) -> Optional[tuple]:
+    """World min/max shared by bounding-box and centre measurements.
+
+    Sphere, cylinder, cone, and torus use support extents. Box and wedge
+    rotate the corners of the local parameter box. Other parts have no
+    analytic bounds.
+    """
+    part_type = part["type"]
+    params = part["params"]
+    if part_type in ("sphere", "cylinder", "cone", "torus"):
+        return _curved_support_aabb(part)
+    if part_type == "box":
+        return _rotated_aabb(
+            part,
+            [0.0, 0.0, 0.0],
+            [float(params["length"]), float(params["width"]), float(params["height"])],
+        )
+    if part_type == "wedge":
+        return _rotated_aabb(
+            part,
+            [float(params["xmin"]), float(params["ymin"]), float(params["zmin"])],
+            [float(params["xmax"]), float(params["ymax"]), float(params["zmax"])],
+        )
+    return None
 
 
 def measure_bounding_box(
@@ -679,22 +793,8 @@ def measure_bounding_box(
         Measurement record with ``min``, ``max``, and ``size`` vectors.
     """
     part = get_part(project, index)
-    p = part["params"]
-    t = part["type"]
-
-    if t in ("sphere", "cylinder", "cone", "torus"):
-        bb_min, bb_max = _curved_support_aabb(part)
-    elif t == "box":
-        bb_min, bb_max = _rotated_aabb(
-            part, [0.0, 0.0, 0.0], [p["length"], p["width"], p["height"]],
-        )
-    elif t == "wedge":
-        bb_min, bb_max = _rotated_aabb(
-            part,
-            [p["xmin"], p["ymin"], p["zmin"]],
-            [p["xmax"], p["ymax"], p["zmax"]],
-        )
-    else:
+    bounds = _part_world_aabb(part)
+    if bounds is None:
         # Unknown / boolean — deferred
         result_bb_def: Dict[str, Any] = {
             "part_index": index,
@@ -707,6 +807,7 @@ def measure_bounding_box(
             result_bb_def["additive"] = True
         return _store_measurement(project, "bounding_box", result_bb_def)
 
+    bb_min, bb_max = bounds
     size = [bb_max[i] - bb_min[i] for i in range(3)]
 
     result_bb: Dict[str, Any] = {

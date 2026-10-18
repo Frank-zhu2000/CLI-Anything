@@ -1573,17 +1573,14 @@ class TestMeasureCenterOfMass:
 
 
 class TestMeasureRotatedBBoxCenter:
-    """Distance and angle follow the rotated bounding-box centre.
+    """Distance and angle follow the world bounding-box centre.
 
-    A cylinder and a cone stand on local +Z, so their bounding-box centre
-    is ``[0, 0, height / 2]`` in the part frame. That offset is rotated by
-    the placement (XYZ Euler, Rx then Ry then Rz, the same convention as
-    ``_transform_point`` / ``FreeCAD.Rotation(rz, ry, rx)``) before the
-    placement position is added. Box and wedge centres are local offsets
-    too. Box and wedge bounds rotate those local corners. Sphere,
-    cylinder, cone, and torus bounds are support extents of the solid,
-    so a rotation that is not a 90 degree axis alignment must not
-    inflate them to the rotated corner box.
+    That centre is the midpoint of the same world bounds as
+    ``measure_bounding_box``: support extents for a sphere, cylinder,
+    cone, and torus, and the rotated local corners for a box and a wedge.
+    A symmetric solid's midpoint is the rotated local centre. An
+    unequal-radius cone is not, once its axis leaves the world axes.
+    List rotations use ``FreeCAD.Rotation(rz, ry, rx)``.
     """
 
     @pytest.mark.parametrize(
@@ -1612,13 +1609,14 @@ class TestMeasureRotatedBBoxCenter:
                 [0.0, 90.0, 0.0],
                 [7.0, -4.0, 1.0],
             ),
-            # Rz(50) Ry(-20) Rx(30) on local [0, 0, 6], then + [1, 2, 3].
+            # Unequal frustum, Rz(50) Ry(-20) Rx(30). Support midpoint,
+            # not the rotated local midpoint [2.155778, -1.289768, 7.882786].
             (
                 "cone",
                 {"radius1": 4.0, "radius2": 2.0, "height": 12.0},
                 [1.0, 2.0, 3.0],
                 [30.0, -20.0, 50.0],
-                [2.155778, -1.289768, 7.882786],
+                [1.174507, -0.453483, 7.301638],
             ),
             # Rx(90) on the box centre [5, 2, 1] is [5, -1, 2], then + [1, 2, 3].
             (
@@ -1856,3 +1854,164 @@ class TestMeasureRotatedBBoxCenter:
         assert result["max"] == expected_max
         assert result["size"] == expected_size
         assert result["deferred"] is False
+
+
+class TestMeasurePlacementRotationForms:
+    """Placement rotations match ``_gen_placements`` and share one centre.
+
+    List ``[rx, ry, rz]`` is ``FreeCAD.Rotation(rz, ry, rx)``. Dict
+    ``yaw`` / ``pitch`` / ``roll`` is ``FreeCAD.Rotation(yaw, pitch, roll)``,
+    so it matches list ``[roll, pitch, yaw]``. Dict ``axis`` + ``angle`` is
+    ``FreeCAD.Rotation(Vector(axis), angle)`` with the angle in degrees;
+    a missing axis component defaults to ``x=0``, ``y=0``, ``z=1``.
+    Distance, angle, and ``_bbox_center`` use the world-bounds midpoint.
+    """
+
+    _PARTS = (
+        ("box", {"length": 10.0, "width": 4.0, "height": 2.0}),
+        ("sphere", {"radius": 2.0}),
+        ("cylinder", {"radius": 2.0, "height": 10.0}),
+        ("cone", {"radius1": 3.0, "radius2": 3.0, "height": 9.0}),
+        ("cone", {"radius1": 4.0, "radius2": 1.0, "height": 8.0}),
+        ("cone", {"radius1": 5.0, "radius2": 0.0, "height": 10.0}),
+        ("cone", {"radius1": 0.0, "radius2": 6.0, "height": 12.0}),
+        ("cone", {"radius1": 0.0, "radius2": 0.0, "height": 10.0}),
+        ("torus", {"radius1": 5.0, "radius2": 1.5}),
+        (
+            "wedge",
+            {
+                "xmin": 0.0, "ymin": 0.0, "zmin": 0.0,
+                "xmax": 10.0, "ymax": 12.0, "zmax": 8.0,
+                "x2min": 2.0, "x2max": 8.0, "z2min": 1.0, "z2max": 6.0,
+            },
+        ),
+    )
+
+    # Rz(45) Ry(30) as an axis/angle. Angle is degrees, matching the macro.
+    _TILT_AXIS = {
+        "axis": {
+            "x": -0.219493454840,
+            "y": 0.529904075526,
+            "z": 0.819160725391,
+        },
+        "angle": 53.647435275563,
+    }
+
+    @staticmethod
+    def _project(part_type, params, position, rotation):
+        proj = _make_project()
+        add_part(
+            proj, part_type, position=position, rotation=[0.0, 0.0, 0.0], params=params,
+        )
+        proj["parts"][0]["placement"]["rotation"] = rotation
+        return proj
+
+    @classmethod
+    def _pack(cls, part_type, params, position, rotation, sphere_position):
+        proj = cls._project(part_type, params, position, rotation)
+        add_part(proj, "sphere", position=sphere_position, params={"radius": 1.0})
+        bounds = measure_bounding_box(proj, 0)
+        distance = measure_distance(proj, 0, 1)
+        angle = measure_angle(proj, 0, 1)
+        return {
+            "center": [round(v, 6) for v in _bbox_center(proj["parts"][0])],
+            "com": measure_center_of_mass(proj, 0)["center_of_mass"],
+            "min": bounds["min"],
+            "max": bounds["max"],
+            "size": bounds["size"],
+            "distance": distance["distance"],
+            "delta": distance["delta"],
+            "angle": angle["angle_deg"],
+        }
+
+    @pytest.mark.parametrize(
+        "rotation",
+        [
+            [0.0, 30.0, 45.0],
+            (0.0, 30.0, 45.0),
+            {"yaw": 45.0, "pitch": 30.0, "roll": 0.0},
+            _TILT_AXIS,
+        ],
+    )
+    def test_unequal_cone_measurements_follow_support_centre(self, rotation):
+        # r1=4, r2=1, h=8, position [2, 3, 4], rotation [0, 30, 45].
+        # World bounds midpoint is not the rotated local [0, 0, 4].
+        packed = self._pack(
+            "cone",
+            {"radius1": 4.0, "radius2": 1.0, "height": 8.0},
+            [2.0, 3.0, 4.0],
+            rotation,
+            [2.0, 3.0, 4.0],
+        )
+        assert packed["min"] == [-1.741657, -0.741657, 2.0]
+        assert packed["max"] == [5.763841, 6.763841, 11.428203]
+        assert packed["size"] == [7.505499, 7.505499, 9.428203]
+        assert packed["com"] == [2.909137, 3.909137, 6.226922]
+        assert packed["center"] == [2.011092, 3.011092, 6.714102]
+        assert packed["distance"] == 2.714147
+        assert packed["delta"] == [-0.011092, -0.011092, -2.714102]
+        assert packed["angle"] == 13.693028
+        midpoint = [
+            round((packed["min"][i] + packed["max"][i]) / 2.0, 6) for i in range(3)
+        ]
+        for got, want in zip(packed["center"], midpoint):
+            assert abs(got - want) <= 1.5e-6
+
+    @pytest.mark.parametrize("part_type,params", _PARTS)
+    def test_list_rotation_centre_matches_bounds(self, part_type, params):
+        proj = self._project(part_type, params, [2.0, 3.0, 4.0], [20.0, 30.0, 40.0])
+        bounds = measure_bounding_box(proj, 0)
+        center = [round(v, 6) for v in _bbox_center(proj["parts"][0])]
+        midpoint = [
+            round((bounds["min"][i] + bounds["max"][i]) / 2.0, 6) for i in range(3)
+        ]
+        for got, want in zip(center, midpoint):
+            assert abs(got - want) <= 1.5e-6
+
+    @pytest.mark.parametrize(
+        "rotation,equivalent",
+        [
+            ({"roll": 90.0}, [90.0, 0.0, 0.0]),
+            ({"pitch": 30.0}, [0.0, 30.0, 0.0]),
+            ({"yaw": 45.0}, [0.0, 0.0, 45.0]),
+            ({"yaw": 45.0, "pitch": 30.0, "roll": 10.0}, [10.0, 30.0, 45.0]),
+            ({"axis": {"x": 1.0, "y": 0.0, "z": 0.0}, "angle": 90.0}, [90.0, 0.0, 0.0]),
+            ({"axis": {"x": 0.0, "y": 1.0, "z": 0.0}, "angle": 30.0}, [0.0, 30.0, 0.0]),
+            ({"axis": {"x": 0.0, "y": 0.0, "z": 1.0}, "angle": 45.0}, [0.0, 0.0, 45.0]),
+            (_TILT_AXIS, [0.0, 30.0, 45.0]),
+        ],
+    )
+    @pytest.mark.parametrize("part_type,params", _PARTS)
+    def test_dict_rotation_matches_list_on_every_measure(
+        self, part_type, params, rotation, equivalent,
+    ):
+        position = [1.0, -2.0, 4.0]
+        sphere_position = [8.0, 5.0, -3.0]
+        got = self._pack(part_type, params, position, rotation, sphere_position)
+        expected = self._pack(
+            part_type, params, position, equivalent, sphere_position,
+        )
+        assert got == expected
+
+    def test_empty_rotation_dict_is_identity(self):
+        params = {"radius": 2.0, "height": 10.0}
+        position = [1.0, 2.0, 3.0]
+        sphere_position = [4.0, 5.0, 6.0]
+        got = self._pack("cylinder", params, position, {}, sphere_position)
+        expected = self._pack(
+            "cylinder", params, position, [0.0, 0.0, 0.0], sphere_position,
+        )
+        assert got == expected
+
+    def test_omitted_axis_z_defaults_to_one(self):
+        params = {"radius": 2.0, "height": 10.0}
+        position = [1.0, 2.0, 3.0]
+        sphere_position = [4.0, 5.0, 6.0]
+        implied = {"axis": {"x": 0.0, "y": 1.0}, "angle": 90.0}
+        explicit = {"axis": {"x": 0.0, "y": 1.0, "z": 1.0}, "angle": 90.0}
+        pure_y = [0.0, 90.0, 0.0]
+        got = self._pack("cylinder", params, position, implied, sphere_position)
+        expected = self._pack("cylinder", params, position, explicit, sphere_position)
+        other = self._pack("cylinder", params, position, pure_y, sphere_position)
+        assert got == expected
+        assert got["center"] != other["center"]
