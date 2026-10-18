@@ -2015,3 +2015,103 @@ class TestMeasurePlacementRotationForms:
         other = self._pack("cylinder", params, position, pure_y, sphere_position)
         assert got == expected
         assert got["center"] != other["center"]
+
+    @pytest.mark.parametrize(
+        "part_type,params,position,rotation,expected",
+        [
+            (
+                "box",
+                {"length": 10.0, "width": 4.0, "height": 2.0},
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 45.0],
+                {
+                    "min": [-2.828427, 0.0, 0.0],
+                    "max": [7.071068, 9.899495, 2.0],
+                    "size": [9.899495, 9.899495, 2.0],
+                    "center": [2.121320, 4.949747, 1.0],
+                },
+            ),
+            (
+                "box",
+                {"length": 10.0, "width": 4.0, "height": 2.0},
+                [2.0, 3.0, 4.0],
+                [20.0, 30.0, 40.0],
+                {
+                    "min": [0.107914, 3.0, -1.0],
+                    "max": [9.793678, 11.965799, 6.812388],
+                    "size": [9.685764, 8.965799, 7.812388],
+                    "center": [4.950796, 7.482900, 2.906194],
+                },
+            ),
+            (
+                "wedge",
+                {
+                    "xmin": 0.0, "ymin": 0.0, "zmin": 0.0,
+                    "xmax": 10.0, "ymax": 12.0, "zmax": 8.0,
+                    "x2min": 2.0, "x2max": 8.0, "z2min": 1.0, "z2max": 6.0,
+                },
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 45.0],
+                {
+                    "min": [-8.485281, 0.0, 0.0],
+                    "max": [7.071068, 15.556349, 8.0],
+                    "size": [15.556349, 15.556349, 8.0],
+                    "center": [-0.707107, 7.778175, 4.0],
+                },
+            ),
+            (
+                "wedge",
+                {
+                    "xmin": 0.0, "ymin": 0.0, "zmin": 0.0,
+                    "xmax": 10.0, "ymax": 12.0, "zmax": 8.0,
+                    "x2min": 2.0, "x2max": 8.0, "z2min": 1.0, "z2max": 6.0,
+                },
+                [2.0, 3.0, 4.0],
+                [20.0, 30.0, 40.0],
+                {
+                    "min": [-3.676258, 3.0, -1.0],
+                    "max": [13.272295, 18.844008, 14.064759],
+                    "size": [16.948553, 15.844008, 15.064759],
+                    "center": [4.798019, 10.922004, 6.532380],
+                },
+            ),
+        ],
+    )
+    def test_box_and_wedge_world_bounds_match_corner_oracle(
+        self, part_type, params, position, rotation, expected,
+    ):
+        """Absolute corner walk for a non-cubic box and a wedge.
+
+        Yaw 45 and Euler ``[20, 30, 40]`` lock min, max, size, centre,
+        and centre of mass. The wedge figure is the parameter box
+        ``(xmin, ymin, zmin)`` to ``(xmax, ymax, zmax)``, not the
+        tapered ``x2`` / ``z2`` face.
+        """
+        proj = self._project(part_type, params, position, rotation)
+        bounds = measure_bounding_box(proj, 0)
+        center = [round(v, 6) for v in _bbox_center(proj["parts"][0])]
+        com = measure_center_of_mass(proj, 0)["center_of_mass"]
+        assert bounds["min"] == expected["min"]
+        assert bounds["max"] == expected["max"]
+        assert bounds["size"] == expected["size"]
+        assert center == expected["center"]
+        assert com == expected["center"]
+
+    @pytest.mark.parametrize("rotation", [None, 90, 1.5, True, "yaw"])
+    def test_non_placement_rotation_raises(self, rotation):
+        """JSON null, a number, a bool, or a string is not a placement rotation."""
+        proj = self._project(
+            "box",
+            {"length": 10.0, "width": 4.0, "height": 2.0},
+            [0.0, 0.0, 0.0],
+            rotation,
+        )
+        add_part(proj, "sphere", position=[1.0, 0.0, 0.0], params={"radius": 1.0})
+        with pytest.raises(TypeError, match="rotation must be"):
+            measure_bounding_box(proj, 0)
+        with pytest.raises(TypeError, match="rotation must be"):
+            measure_center_of_mass(proj, 0)
+        with pytest.raises(TypeError, match="rotation must be"):
+            measure_distance(proj, 0, 1)
+        with pytest.raises(TypeError, match="rotation must be"):
+            measure_angle(proj, 0, 1)

@@ -97,7 +97,9 @@ def _rotation_to_matrix(rotation: Any) -> List[List[float]]:
     * dict ``{"yaw", "pitch", "roll"}`` degrees becomes
       ``FreeCAD.Rotation(yaw, pitch, roll)``, which is list
       ``[roll, pitch, yaw]``.
-    * any other mapping, including ``{}``, is the identity.
+    * any other dict, including ``{}``, is the identity.
+    * any other type raises ``TypeError``. ``_gen_placements`` rejects
+      JSON null, numbers, bools, and strings as well.
     """
     if isinstance(rotation, (list, tuple)):
         rx = float(rotation[0]) if len(rotation) > 0 else 0.0
@@ -112,7 +114,11 @@ def _rotation_to_matrix(rotation: Any) -> List[List[float]]:
             pitch = float(rotation.get("pitch", 0.0))
             roll = float(rotation.get("roll", 0.0))
             return _rotation_matrix([roll, pitch, yaw])
-    return _rotation_matrix([0.0, 0.0, 0.0])
+        return _rotation_matrix([0.0, 0.0, 0.0])
+    raise TypeError(
+        "rotation must be a list, tuple, or dict, "
+        f"not {type(rotation).__name__}"
+    )
 
 
 def _axis_angle_matrix(axis: Any, angle_deg: Any) -> List[List[float]]:
