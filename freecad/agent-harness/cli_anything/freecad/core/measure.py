@@ -10,7 +10,12 @@ import math
 from typing import Any, Dict, List, Optional
 
 from cli_anything.freecad.core.document import ensure_collection
-from cli_anything.freecad.core.parts import PRIMITIVES, _transform_point, get_part
+from cli_anything.freecad.core.parts import (
+    PRIMITIVES,
+    _rotation_matrix,
+    _transform_point,
+    get_part,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -576,6 +581,63 @@ def measure_center_of_mass(
     return _store_measurement(project, "center_of_mass", result_com)
 
 
+def _curved_local_support(
+    part_type: str,
+    params: Dict[str, Any],
+    direction: List[float],
+) -> float:
+    """Support of a curved primitive along a local direction.
+
+    Sphere, cylinder, cone, and torus are solids of revolution about
+    local +Z. The value is the maximum of direction dot point over the solid.
+    ``direction`` does not need to be a unit vector. A cone is the convex
+    hull of the radius1 disk at ``z = 0`` and the radius2 disk at
+    ``z = height``.
+    """
+    ux = float(direction[0])
+    uy = float(direction[1])
+    uz = float(direction[2])
+    radial = math.hypot(ux, uy)
+    if part_type == "sphere":
+        return float(params["radius"]) * math.hypot(ux, uy, uz)
+    if part_type == "cylinder":
+        axial = float(params["height"]) * uz if uz > 0.0 else 0.0
+        return float(params["radius"]) * radial + axial
+    if part_type == "cone":
+        base = float(params["radius1"]) * radial
+        cap = float(params["radius2"]) * radial + float(params["height"]) * uz
+        return max(base, cap)
+    if part_type == "torus":
+        major = float(params["radius1"])
+        minor = float(params["radius2"])
+        return major * radial + minor * math.hypot(ux, uy, uz)
+    raise ValueError(f"not a curved primitive: {part_type}")
+
+
+def _curved_support_aabb(part: Dict[str, Any]) -> tuple:
+    """World axis-aligned bounds from curved-primitive support extents.
+
+    World axis ``i`` is row ``i`` of the placement rotation. The max is the
+    support of that row and the min is the negated support of the opposite
+    row, then the placement position is added. The local box corners are
+    not rotated: they lie outside the solid.
+    """
+    pos = _get_position(part)
+    rotation = part.get("placement", {}).get("rotation", [0.0, 0.0, 0.0])
+    matrix = _rotation_matrix(rotation)
+    part_type = part["type"]
+    params = part["params"]
+    bb_min: List[float] = []
+    bb_max: List[float] = []
+    for axis in range(3):
+        row = matrix[axis]
+        opposite = [-component for component in row]
+        bb_max.append(pos[axis] + _curved_local_support(part_type, params, row))
+        bb_min.append(
+            pos[axis] - _curved_local_support(part_type, params, opposite)
+        )
+    return bb_min, bb_max
+
 def _rotated_aabb(
     part: Dict[str, Any],
     local_min: List[float],
@@ -606,9 +668,10 @@ def measure_bounding_box(
 ) -> Dict[str, Any]:
     """Compute the axis-aligned bounding box of a part.
 
-    The bounding box is derived from the part's position, rotation, and
-    primitive parameters. Local corners are rotated with ``_transform_point``
-    before the axis-aligned min and max are taken.
+    Box and wedge bounds rotate the corners of the local box. Sphere,
+    cylinder, cone, and torus bounds are support extents of the solid in
+    the placement frame, so a non-axis-aligned rotation does not inflate
+    the box to those corners.
 
     Returns
     -------
@@ -619,29 +682,18 @@ def measure_bounding_box(
     p = part["params"]
     t = part["type"]
 
-    if t == "box":
-        local_min = [0.0, 0.0, 0.0]
-        local_max = [p["length"], p["width"], p["height"]]
-    elif t == "cylinder":
-        r = p["radius"]
-        local_min = [-r, -r, 0.0]
-        local_max = [r, r, p["height"]]
-    elif t == "sphere":
-        r = p["radius"]
-        local_min = [-r, -r, -r]
-        local_max = [r, r, r]
-    elif t == "cone":
-        r = max(p["radius1"], p["radius2"])
-        local_min = [-r, -r, 0.0]
-        local_max = [r, r, p["height"]]
-    elif t == "torus":
-        major, r = p["radius1"], p["radius2"]
-        outer = major + r
-        local_min = [-outer, -outer, -r]
-        local_max = [outer, outer, r]
+    if t in ("sphere", "cylinder", "cone", "torus"):
+        bb_min, bb_max = _curved_support_aabb(part)
+    elif t == "box":
+        bb_min, bb_max = _rotated_aabb(
+            part, [0.0, 0.0, 0.0], [p["length"], p["width"], p["height"]],
+        )
     elif t == "wedge":
-        local_min = [p["xmin"], p["ymin"], p["zmin"]]
-        local_max = [p["xmax"], p["ymax"], p["zmax"]]
+        bb_min, bb_max = _rotated_aabb(
+            part,
+            [p["xmin"], p["ymin"], p["zmin"]],
+            [p["xmax"], p["ymax"], p["zmax"]],
+        )
     else:
         # Unknown / boolean — deferred
         result_bb_def: Dict[str, Any] = {
@@ -655,7 +707,6 @@ def measure_bounding_box(
             result_bb_def["additive"] = True
         return _store_measurement(project, "bounding_box", result_bb_def)
 
-    bb_min, bb_max = _rotated_aabb(part, local_min, local_max)
     size = [bb_max[i] - bb_min[i] for i in range(3)]
 
     result_bb: Dict[str, Any] = {

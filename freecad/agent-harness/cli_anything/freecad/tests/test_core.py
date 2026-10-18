@@ -1580,8 +1580,10 @@ class TestMeasureRotatedBBoxCenter:
     the placement (XYZ Euler, Rx then Ry then Rz, the same convention as
     ``_transform_point`` / ``FreeCAD.Rotation(rz, ry, rx)``) before the
     placement position is added. Box and wedge centres are local offsets
-    too. The axis-aligned bounding box is the bounds of those rotated
-    local corners.
+    too. Box and wedge bounds rotate those local corners. Sphere,
+    cylinder, cone, and torus bounds are support extents of the solid,
+    so a rotation that is not a 90 degree axis alignment must not
+    inflate them to the rotated corner box.
     """
 
     @pytest.mark.parametrize(
@@ -1755,3 +1757,102 @@ class TestMeasureRotatedBBoxCenter:
         assert result["min"] == expected_min
         assert result["max"] == expected_max
         assert result["size"] == expected_size
+
+    @pytest.mark.parametrize(
+        ("part_type", "params", "position", "rotation", "expected_min", "expected_max", "expected_size"),
+        [
+            # Radius-1 sphere is rotation-invariant. Rz(45) must stay inside ±1.
+            (
+                "sphere",
+                {"radius": 1.0},
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 45.0],
+                [-1.0, -1.0, -1.0],
+                [1.0, 1.0, 1.0],
+                [2.0, 2.0, 2.0],
+            ),
+            # Cylinder rotated about its axis: the disk support is the radius.
+            (
+                "cylinder",
+                {"radius": 1.0, "height": 4.0},
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 45.0],
+                [-1.0, -1.0, 0.0],
+                [1.0, 1.0, 4.0],
+                [2.0, 2.0, 4.0],
+            ),
+            # Torus rotated about its axis: outer reach is major + tube.
+            (
+                "torus",
+                {"radius1": 2.0, "radius2": 1.0},
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 45.0],
+                [-3.0, -3.0, -1.0],
+                [3.0, 3.0, 1.0],
+                [6.0, 6.0, 2.0],
+            ),
+            # Frustum about Z: the larger base sets the radial support.
+            (
+                "cone",
+                {"radius1": 3.0, "radius2": 1.0, "height": 5.0},
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 45.0],
+                [-3.0, -3.0, 0.0],
+                [3.0, 3.0, 5.0],
+                [6.0, 6.0, 5.0],
+            ),
+            # Translated sphere, arbitrary Euler angles: still placement ± radius.
+            (
+                "sphere",
+                {"radius": 2.0},
+                [4.0, -1.0, 3.0],
+                [15.0, 25.0, 35.0],
+                [2.0, -3.0, 1.0],
+                [6.0, 1.0, 5.0],
+                [4.0, 4.0, 4.0],
+            ),
+            # Rx(30) Ry(20) cylinder. Support of the disk and the [0, h] segment.
+            (
+                "cylinder",
+                {"radius": 2.0, "height": 10.0},
+                [1.0, -2.0, 4.0],
+                [30.0, 20.0, 0.0],
+                [-0.910253, -8.732051, 2.837703],
+                [5.872234, -0.267949, 13.300273],
+                [6.782487, 8.464102, 10.46257],
+            ),
+            # Same tilt for a torus: major * radial + tube * ||direction||.
+            (
+                "torus",
+                {"radius1": 5.0, "radius2": 1.5},
+                [0.0, 0.0, 0.0],
+                [30.0, 20.0, 0.0],
+                [-6.275633, -5.830127, -4.405741],
+                [6.275633, 5.830127, 4.405741],
+                [12.551265, 11.660254, 8.811483],
+            ),
+            # Unequal-radius cone under Ry(30) Rz(45). Ends are two disks.
+            (
+                "cone",
+                {"radius1": 4.0, "radius2": 1.0, "height": 8.0},
+                [2.0, 3.0, 4.0],
+                [0.0, 30.0, 45.0],
+                [-1.741657, -0.741657, 2.0],
+                [5.763841, 6.763841, 11.428203],
+                [7.505499, 7.505499, 9.428203],
+            ),
+        ],
+    )
+    def test_curved_bounding_box_uses_support_extents(
+        self, part_type, params, position, rotation,
+        expected_min, expected_max, expected_size,
+    ):
+        proj = _make_project()
+        add_part(
+            proj, part_type, position=position, rotation=rotation, params=params,
+        )
+        result = measure_bounding_box(proj, 0)
+        assert result["min"] == expected_min
+        assert result["max"] == expected_max
+        assert result["size"] == expected_size
+        assert result["deferred"] is False
